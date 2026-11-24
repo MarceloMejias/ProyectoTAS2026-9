@@ -12,7 +12,10 @@ Repositorio de configuraciones, automatización y documentación técnica para e
 ```text
 .
 ├── Actividad_1_TechnoMarket_Final.pdf   # Enunciado oficial y rúbrica de evaluación
-├── *.ovf / *.mf                         # Descriptores OVF reparados (sin dependencia de ISOs)
+├── vmware/                              # Plantillas OVF reparadas (sin dependencia de ISOs) y discos VMDK
+│   ├── PC1-WIN/                         # Cliente Windows departamental
+│   ├── RockyTAS/                        # Base Rocky Linux (DNSDHCP y HTTPS)
+│   └── WIN-Server/                      # Servidor Windows (ACDC)
 ├── configs/
 │   ├── routers/
 │   │   ├── base/                        # Configs originales extraídas de ProyectoTAS

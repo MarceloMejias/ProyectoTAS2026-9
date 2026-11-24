@@ -6,12 +6,12 @@ Al inspeccionar los archivos originales de `ProyectoTAS.tar.gz`, se identificaro
 
 ## 1. Importar las Máquinas Virtuales OVF en VMware Workstation
 
-Los archivos `.ovf` y `.mf` de la raíz del repositorio **ya fueron reparados** para no exigir las ISOs de instalación faltantes:
+Los archivos `.ovf` y `.mf` dentro de la carpeta `vmware/` **ya fueron reparados** para no exigir las ISOs de instalación faltantes:
 
 1. En VMware Workstation, ir a **File $\rightarrow$ Open...** e importar como plantillas base:
-   - `PC1-WIN.ovf` (Cliente Windows para departamentos)
-   - `RockyTAS.ovf` (Base Rocky Linux para `DNSDHCP` y `HTTPS`)
-   - `WIN-Server.ovf` (Servidor `ACDC`)
+   - `vmware/PC1-WIN/PC1-WIN.ovf` (Cliente Windows para departamentos)
+   - `vmware/RockyTAS/RockyTAS.ovf` (Base Rocky Linux para `DNSDHCP` y `HTTPS`)
+   - `vmware/WIN-Server/WIN-Server.ovf` (Servidor `ACDC`)
    - *(Para `FirewallSantiago`, importar el OVF/ISO de **pfSense CE 2.7.x** con 3 adaptadores de red `e1000` y 1 GB RAM).*
 2. En VMware (**Edit $\rightarrow$ Virtual Network Editor** $\rightarrow$ *Change Settings*):
    - En las redes `VMnet` tipo *Host-only* que utilice GNS3, **desmarcar "Use local DHCP service to distribute IP address to VMs"** para que no compita con el servidor `DNSDHCP` de la DMZ.
