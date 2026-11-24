@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-Utilidad offline para adaptar ProyectoTAS.gns3 en Windows:
-1. Permite actualizar el nombre/MD5 de la imagen IOS c2691 si usas otra versión.
-2. Permite inyectar el segundo enlace WAN de Capa 3 (Variante 9):
-   Santiago (Fa1/0) <-> Vina (Fa0/1) si aún no existe en la topología.
+Utilidad offline para adaptar ProyectoTAS.gns3 de Linux (/home/victor/...) a Windows:
+1. inspect:          Muestra nodos, imágenes, rutas VMX y enlaces actuales.
+2. fix-vmware-paths: Corrige las rutas Linux (/home/victor/...) en ProyectoTAS.gns3 y limpia
+                     ISOs/pipes de Linux dentro de los archivos .vmx del proyecto.
+3. set-ios:          Actualiza el nombre/MD5 de la imagen IOS c2691 si usas otra versión.
+4. add-backup-link:  Inyecta el segundo enlace WAN de Capa 3 (Variante 9):
+                     Santiago (Fa1/0) <-> Vina (Fa0/1).
 
-Importante: Cierra el proyecto en GNS3 antes de ejecutar modificaciones.
+Importante: Cierra GNS3 antes de ejecutar comandos que modifiquen ProyectoTAS.gns3.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -28,6 +32,33 @@ def backup_file(path: Path) -> Path:
     bak = path.with_suffix(path.suffix + ".bak_script")
     shutil.copy2(path, bak)
     return bak
+
+
+def clean_linux_vmx(vmx_file: Path) -> None:
+    """Elimina referencias a /home/victor/*.iso y pipes /tmp/... en archivos .vmx exportados desde Linux."""
+    lines = vmx_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("#!/usr/bin/vmware"):
+            continue
+        if re.match(r'^(ide\d+:\d+|sata\d+:\d+)\.filename\s*=\s*"/home/.*"', stripped):
+            prefix = stripped.split(".")[0]
+            out.append(f'{prefix}.filename = ""')
+            out.append(f'{prefix}.present = "FALSE"')
+            continue
+        if re.match(r'^(ide\d+:\d+|sata\d+:\d+)\.present\s*=\s*"TRUE"', stripped):
+            # Se desactiva si apuntaba a una ISO de Linux
+            continue
+        if stripped.startswith("filesearchpath") and "/home/" in stripped:
+            out.append('filesearchpath = "."')
+            continue
+        if stripped.startswith("serial0.") and ("/tmp/" in stripped or "present" in stripped):
+            if "present" in stripped:
+                out.append('serial0.present = "FALSE"')
+            continue
+        out.append(line)
+    vmx_file.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
 def cmd_inspect(gns3_path: Path) -> None:
@@ -53,6 +84,32 @@ def cmd_inspect(gns3_path: Path) -> None:
             f"- {na} ({a['adapter_number']}/{a['port_number']}) <-> "
             f"{nb} ({b['adapter_number']}/{b['port_number']})"
         )
+
+
+def cmd_fix_vmware_paths(gns3_path: Path) -> None:
+    data = json.loads(gns3_path.read_text(encoding="utf-8"))
+    vmware_dir = gns3_path.parent / "project-files" / "vmware"
+    bak = backup_file(gns3_path)
+
+    fixed_nodes = 0
+    for node in data["topology"]["nodes"]:
+        if node.get("node_type") != "vmware":
+            continue
+        node_id = node["node_id"]
+        old_vmx = node.get("properties", {}).get("vmx_path", "")
+        vmx_name = Path(old_vmx).name
+        local_vmx = (vmware_dir / node_id / vmx_name).resolve()
+        if local_vmx.exists():
+            clean_linux_vmx(local_vmx)
+            node["properties"]["vmx_path"] = str(local_vmx)
+            fixed_nodes += 1
+            print(f"[OK] {node['name']:24s} -> {local_vmx}")
+        else:
+            print(f"[WARN] No se encontró archivo VMX local para {node['name']}: {local_vmx}")
+
+    gns3_path.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    print(f"\nRespaldo guardado en: {bak}")
+    print(f"Rutas VMX corregidas en {fixed_nodes} nodos.")
 
 
 def cmd_set_ios(gns3_path: Path, image_file: Path) -> None:
@@ -133,6 +190,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="action", required=True)
 
     sub.add_parser("inspect", help="Muestra nodos, imágenes, rutas VMX y enlaces actuales")
+    sub.add_parser("fix-vmware-paths", help="Convierte rutas VMX de /home/victor/... a rutas locales de Windows")
 
     p_ios = sub.add_parser("set-ios", help="Cambia la imagen IOS de los routers c2691")
     p_ios.add_argument("image_path", type=Path, help="Ruta al archivo .image/.bin que tienes en GNS3\\images\\IOS")
@@ -145,6 +203,8 @@ def main() -> None:
 
     if args.action == "inspect":
         cmd_inspect(args.gns3)
+    elif args.action == "fix-vmware-paths":
+        cmd_fix_vmware_paths(args.gns3)
     elif args.action == "set-ios":
         cmd_set_ios(args.gns3, args.image_path)
     elif args.action == "add-backup-link":
