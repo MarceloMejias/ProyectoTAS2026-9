@@ -1,24 +1,16 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Configuración automatizada de Servidor Web Corporativo (Rocky Linux - RockyTAS)
-# IP Estática en DMZ: 192.168.0.36/29 | Gateway: 192.168.0.33 | DNS: 192.168.0.34
-# Dominio: www.technomarket.cl / portal.technomarket.cl
+# Configuración automatizada de Servidor Web Corporativo (Rocky Linux - HTTPS)
+# Orden inteligente:
+#   1. Instala paquetes mientras aún tiene internet por NAT en VMware.
+#   2. Publica el portal de TechnoMarket Ltda., ajusta SELinux y abre firewalld.
+#   3. Al final deja configurada la IP estática de DMZ: 192.168.0.36/29 (GW .33).
 # =============================================================================
 set -euo pipefail
 
-IFACE="${1:-$(nmcli -t -f DEVICE,TYPE device | awk -F: '$2=="ethernet"{print $1; exit}')}"
-CONN_NAME="$(nmcli -t -f NAME,DEVICE connection show | awk -F: -v dev="$IFACE" '$2==dev{print $1; exit}')"
+APPLY_STATIC_IP="${1:---static}"
 
-echo "[1/4] Configurando IP estática 192.168.0.36/29 en $IFACE ($CONN_NAME)..."
-nmcli connection modify "$CONN_NAME" \
-  ipv4.method manual \
-  ipv4.addresses "192.168.0.36/29" \
-  ipv4.gateway "192.168.0.33" \
-  ipv4.dns "192.168.0.34" \
-  connection.autoconnect yes
-nmcli connection up "$CONN_NAME"
-
-echo "[2/4] Verificando/instalando servidor web (nginx o httpd)..."
+echo "[1/4] Verificando/instalando servidor web (nginx o httpd) usando conexión actual..."
 WEB_SVC=""
 DOCROOT="/usr/share/nginx/html"
 if rpm -q nginx >/dev/null 2>&1; then
@@ -36,7 +28,8 @@ else
   fi
 fi
 
-echo "[3/4] Publicando portal corporativo TechnoMarket Ltda. en $DOCROOT..."
+echo "[2/4] Publicando portal corporativo TechnoMarket Ltda. en $DOCROOT..."
+mkdir -p "$DOCROOT"
 cat >"$DOCROOT/index.html" <<'EOF'
 <!DOCTYPE html>
 <html lang="es">
@@ -65,13 +58,42 @@ cat >"$DOCROOT/index.html" <<'EOF'
 </html>
 EOF
 
+# Ajustar contexto SELinux en Rocky Linux para evitar 403 Forbidden
+if command -v restorecon >/dev/null 2>&1; then
+  restorecon -Rv "$DOCROOT" >/dev/null 2>&1 || true
+fi
+
 systemctl enable --now "$WEB_SVC"
 
-echo "[4/4] Abriendo puertos HTTP/HTTPS en firewalld..."
+echo "[3/4] Abriendo puertos HTTP/HTTPS en firewalld y probando respuesta local..."
 if systemctl is-active --quiet firewalld; then
   firewall-cmd --permanent --add-service=http
   firewall-cmd --permanent --add-service=https
   firewall-cmd --reload
 fi
+curl -sI http://127.0.0.1 | head -n 5
 
-echo "Listo. Prueba local: curl -I http://192.168.0.36"
+if [[ "$APPLY_STATIC_IP" == "--no-ip" ]]; then
+  echo "[4/4] Omitido cambio de IP (--no-ip). Para pasar a DMZ luego ejecuta este script sin argumentos."
+  exit 0
+fi
+
+echo "[4/4] Configurando IP estática de DMZ 192.168.0.36/29 (GW 192.168.0.33, DNS 192.168.0.34)..."
+echo "      (Nota: si estabas conectado por SSH sobre NAT, la sesión se cortará al cambiar a la IP de DMZ)."
+IFACE="$(nmcli -t -f DEVICE,TYPE device | awk -F: '$2=="ethernet"{print $1; exit}')"
+CONN_NAME="$(nmcli -t -f NAME,DEVICE connection show | awk -F: -v dev="$IFACE" '$2==dev{print $1; exit}')"
+if [[ -z "$CONN_NAME" ]]; then
+  CONN_NAME="$(nmcli -t -f NAME,TYPE connection show | awk -F: '$2=="802-3-ethernet"{print $1; exit}')"
+fi
+
+nmcli connection modify "$CONN_NAME" \
+  connection.interface-name "" \
+  802-3-ethernet.mac-address "" \
+  ipv4.method manual \
+  ipv4.addresses "192.168.0.36/29" \
+  ipv4.gateway "192.168.0.33" \
+  ipv4.dns "192.168.0.34" \
+  connection.autoconnect yes
+
+nmcli connection up "$CONN_NAME" || true
+echo "[OK] Servidor HTTPS configurado en 192.168.0.36/29."

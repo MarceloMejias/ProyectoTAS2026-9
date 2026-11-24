@@ -19,8 +19,8 @@ Según la rúbrica oficial (60% grupal + 40% individual), la presentación dura 
 ### Prueba 1 — Variante 1: Concesión Remota por Relay en Dos Ámbitos + Gateway/DNS
 1. **Mostrar configuración de Relay en el router `Valparaiso`:**
    ```ios
-   show ip interface Vlan10 | include Internet|Helper
-   show ip interface Vlan20 | include Internet|Helper
+   show ip interface FastEthernet0/1.10 | include Internet|Helper
+   show ip interface FastEthernet0/1.20 | include Internet|Helper
    ```
    *(Muestra `Helper address is 192.168.0.34` en ambas VLANs).*
 2. **Concesión en Ámbito 1 (VLAN 10 — Ventas `10.0.0.0/28`):**

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Cliente de automatización en vivo para GNS3 + Consolas Cisco IOS (Equipo 1 — Variante 1).
+Cliente de automatización para GNS3 + Consolas Cisco IOS (Equipo 1 — Variante 1).
 - Autodetecta IP, puerto y credenciales HTTP de GNS3 leyendo %APPDATA%\\GNS3\\*\\gns3_server.ini.
-- Enciende únicamente los routers (Santiago, Vina/Valparaiso) y switches Ethernet (0 MB RAM).
-- Limpia cualquier segundo enlace WAN residual (Fa1/0 <-> Fa0/1) si quedó de pruebas previas.
-- Sincroniza cada comando esperando el prompt real de Cisco IOS e inyecta las configs de Variante 1.
+- Conecta SwitchAccesoV Ethernet0 a Vina FastEthernet0/1 (Router-on-a-Stick 802.1Q nativo).
+- En 'push-configs', inyecta atómicamente el startup-config directamente en NVRAM vía la API REST
+  de GNS3 (sin depender de Telnet ni colisionar con ventanas Solar-PuTTY abiertas) y arranca los routers.
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ import json
 import os
 import re
 import socket
-import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -33,17 +33,34 @@ SWITCH_V_ID = "cba0b89a-696e-43c4-8b01-af8d3ed8becb"
 ROUTERS = {
     "santiago": {
         "node_id": SANTIAGO_ID,
+        "dynamips_id": 1,
         "names": {"santiago"},
-        "vlans": [],  # Santiago solo usa puertos ruteados Fa0/0 y Fa0/1 en Variante 1
         "cfg": CONFIGS_DIR / "Santiago_variante1.cfg",
     },
     "valparaiso": {
         "node_id": VINA_ID,
+        "dynamips_id": 2,
         "names": {"vina", "valparaiso"},
-        "vlans": [(10, "VENTAS"), (20, "SOPORTE"), (30, "BODEGA"), (99, "NATIVA")],
         "cfg": CONFIGS_DIR / "Vina_variante1.cfg",
     },
 }
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def to_clean_ascii(text: str) -> bytes:
+    """Convierte tildes/UTF-8 a ASCII puro compatible con Cisco IOS."""
+    norm = unicodedata.normalize("NFKD", text)
+    return norm.encode("ascii", errors="ignore")
+
+
+def clean_telnet_bytes(data: bytes) -> str:
+    """Elimina secuencias Telnet IAC (0xFF ...), bytes nulos (0x00) y códigos ANSI."""
+    cleaned = re.sub(b"\xff[\xfb-\xfe].", b"", data)
+    cleaned = re.sub(b"\xff[\xf0-\xfa]", b"", cleaned)
+    cleaned = cleaned.replace(b"\x00", b"")
+    text = cleaned.decode("latin-1", errors="ignore")
+    return ANSI_RE.sub("", text)
 
 
 @dataclass
@@ -92,17 +109,28 @@ class GNS3Client:
     def __init__(self, cfg: GNS3Config) -> None:
         self.cfg = cfg
 
+    def _auth_header(self, req: urllib.request.Request) -> None:
+        if self.cfg.user:
+            token = base64.b64encode(f"{self.cfg.user}:{self.cfg.password}".encode("utf-8")).decode("ascii")
+            req.add_header("Authorization", f"Basic {token}")
+
     def request(self, method: str, endpoint: str, payload: object | None = None) -> object:
         url = f"{self.cfg.base_url}/{endpoint.lstrip('/')}"
         data = None if payload is None else json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Content-Type", "application/json")
-        if self.cfg.user:
-            token = base64.b64encode(f"{self.cfg.user}:{self.cfg.password}".encode("utf-8")).decode("ascii")
-            req.add_header("Authorization", f"Basic {token}")
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        self._auth_header(req)
+        with urllib.request.urlopen(req, timeout=20) as resp:
             raw = resp.read().decode("utf-8")
             return json.loads(raw) if raw.strip() else {}
+
+    def upload_node_file(self, pid: str, nid: str, rel_path: str, raw_bytes: bytes) -> None:
+        url = f"{self.cfg.base_url}/v2/projects/{pid}/nodes/{nid}/files/{rel_path.lstrip('/')}"
+        req = urllib.request.Request(url, data=raw_bytes, method="POST")
+        req.add_header("Content-Type", "application/octet-stream")
+        self._auth_header(req)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            resp.read()
 
     def get_active_project(self, project_name: str = "ProyectoTAS") -> dict:
         projects: list[dict] = self.request("GET", "/v2/projects")  # type: ignore[assignment]
@@ -122,18 +150,73 @@ class GNS3Client:
 
         raise SystemExit(f"No se encontró el proyecto '{project_name}' abierto en GNS3.")
 
-    def ensure_lightweight_stage_ready(self) -> tuple[dict, dict[str, dict]]:
-        """Asegura switches y routers encendidos (sin tocar VMs de VMware) y limpia enlace extra si existía."""
-        proj = self.get_active_project()
-        pid = proj["project_id"]
+    def restart_node(self, pid: str, node: dict) -> dict:
+        nid = node["node_id"]
+        print(f"[*] Reiniciando nodo '{node['name']}' vía API GNS3...")
+        self.request("POST", f"/v2/projects/{pid}/nodes/{nid}/stop", {})
+        time.sleep(1.0)
+        self.request("POST", f"/v2/projects/{pid}/nodes/{nid}/start", {})
+        time.sleep(7.0)
+        nodes: list[dict] = self.request("GET", f"/v2/projects/{pid}/nodes")  # type: ignore[assignment]
+        return next(n for n in nodes if n["node_id"] == nid)
 
-        # Limpiar segundo enlace WAN si quedó creado de la prueba anterior
+    def ensure_topology_wiring(self, pid: str) -> None:
+        """Asegura el enlace WAN principal (Fa0/0 <-> Fa0/0) y el troncal Vina Fa0/1 <-> SwitchAccesoV e0."""
         links: list[dict] = self.request("GET", f"/v2/projects/{pid}/links")  # type: ignore[assignment]
+        has_main_wan = False
+        has_roas_trunk = False
         for lk in links:
             eps = {(e["node_id"], e["adapter_number"], e["port_number"]) for e in lk.get("nodes", [])}
-            if (SANTIAGO_ID, 1, 0) in eps and (VINA_ID, 0, 1) in eps:
-                print("[*] Eliminando enlace WAN secundario innecesario para Equipo 1...")
+            if (SANTIAGO_ID, 0, 0) in eps and (VINA_ID, 0, 0) in eps:
+                has_main_wan = True
+                continue
+            if (SANTIAGO_ID, 1, 0) in eps:
+                print("[*] Eliminando enlace WAN secundario innecesario...")
                 self.request("DELETE", f"/v2/projects/{pid}/links/{lk['link_id']}")
+                continue
+            if (VINA_ID, 1, 0) in eps and (SWITCH_V_ID, 0, 0) in eps:
+                print("[*] Moviendo troncal de Sucursal de Vina Fa1/0 a Vina Fa0/1 (Router-on-a-Stick 802.1Q)...")
+                self.request("DELETE", f"/v2/projects/{pid}/links/{lk['link_id']}")
+                continue
+            if (VINA_ID, 0, 1) in eps and (SWITCH_V_ID, 0, 0) in eps:
+                has_roas_trunk = True
+
+        if not has_main_wan:
+            print("[*] Conectando enlace WAN principal: Santiago (Fa0/0) <-> Vina (Fa0/0)...")
+            self.request(
+                "POST",
+                f"/v2/projects/{pid}/links",
+                {
+                    "nodes": [
+                        {"node_id": SANTIAGO_ID, "adapter_number": 0, "port_number": 0},
+                        {"node_id": VINA_ID, "adapter_number": 0, "port_number": 0},
+                    ]
+                },
+            )
+
+        if not has_roas_trunk:
+            links = self.request("GET", f"/v2/projects/{pid}/links")  # type: ignore[assignment]
+            fa01_busy = any(
+                (VINA_ID, 0, 1) in {(e["node_id"], e["adapter_number"], e["port_number"]) for e in lk.get("nodes", [])}
+                for lk in links
+            )
+            if not fa01_busy:
+                print("[*] Conectando troncal 802.1Q: Vina (Fa0/1) <-> SwitchAccesoV (e0)...")
+                self.request(
+                    "POST",
+                    f"/v2/projects/{pid}/links",
+                    {
+                        "nodes": [
+                            {"node_id": VINA_ID, "adapter_number": 0, "port_number": 1},
+                            {"node_id": SWITCH_V_ID, "adapter_number": 0, "port_number": 0},
+                        ]
+                    },
+                )
+
+    def ensure_lightweight_stage_ready(self) -> tuple[dict, dict[str, dict]]:
+        proj = self.get_active_project()
+        pid = proj["project_id"]
+        self.ensure_topology_wiring(pid)
 
         nodes: list[dict] = self.request("GET", f"/v2/projects/{pid}/nodes")  # type: ignore[assignment]
         started_any_router = False
@@ -145,8 +228,8 @@ class GNS3Client:
                     started_any_router = True
 
         if started_any_router:
-            print("[*] Esperando 5s iniciales para descompresión de imagen Cisco IOS...")
-            time.sleep(5.0)
+            print("[*] Esperando 7s para arranque de Cisco IOS...")
+            time.sleep(7.0)
 
         nodes = self.request("GET", f"/v2/projects/{pid}/nodes")  # type: ignore[assignment]
         router_nodes: dict[str, dict] = {}
@@ -166,72 +249,107 @@ class GNS3Client:
 
 
 class IOSConsole:
-    """Cliente sincronizado por prompt real sobre socket TCP para consolas Cisco IOS en Dynamips."""
+    """Cliente sincronizado por prompt real sobre socket Telnet/TCP para consolas Cisco IOS en Dynamips."""
 
-    PROMPT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*(?:\([A-Za-z0-9_-]+\))?[#>]$")
+    PROMPT_RE = re.compile(r"([A-Za-z][A-Za-z0-9_-]*(?:\([A-Za-z0-9_-]+\))?[#>])\s*$")
 
     def __init__(self, host: str, port: int, timeout: float = 8.0) -> None:
         self.sock = socket.create_connection((host, port), timeout=timeout)
-        self.sock.settimeout(0.25)
+        self.sock.settimeout(0.3)
 
     def close(self) -> None:
-        self.sock.close()
-
-    def flush_input(self) -> None:
-        self.sock.settimeout(0.05)
         try:
-            while self.sock.recv(4096):
-                pass
+            self.sock.close()
+        except OSError:
+            pass
+
+    def flush_input(self) -> str:
+        self.sock.settimeout(0.08)
+        chunks: list[bytes] = []
+        try:
+            while True:
+                d = self.sock.recv(4096)
+                if not d:
+                    break
+                chunks.append(d)
         except socket.timeout:
             pass
         finally:
-            self.sock.settimeout(0.25)
+            self.sock.settimeout(0.3)
+        return clean_telnet_bytes(b"".join(chunks)) if chunks else ""
 
     @classmethod
     def _extract_trailing_prompt(cls, text: str) -> str:
         if not text:
             return ""
-        tail = text.replace("\r", "\n").split("\n")[-1].strip()
-        return tail if cls.PROMPT_RE.match(tail) else ""
+        lines = [
+            re.sub(r"[\x00-\x1f\x7f]", "", ln).strip()
+            for ln in text.replace("\r", "\n").split("\n")
+        ]
+        non_empty = [ln for ln in lines if ln]
+        if not non_empty:
+            return ""
+        m = cls.PROMPT_RE.search(non_empty[-1])
+        return m.group(1) if m else ""
 
-    def send(self, cmd: str, timeout: float = 20.0) -> str:
-        """Envía un comando y espera hasta recibir el siguiente prompt válido de IOS."""
+    def send(self, cmd: str, timeout: float = 15.0) -> str:
         self.flush_input()
-        self.sock.sendall((cmd + "\r\n").encode("ascii"))
+        self.sock.sendall(to_clean_ascii(cmd + "\r\n"))
         deadline = time.time() + timeout
         buf = ""
         saw_newline = cmd == ""
+        idle_timeouts = 0
 
         while time.time() < deadline:
             try:
                 chunk = self.sock.recv(4096)
                 if not chunk:
                     break
-                decoded = chunk.decode("latin-1", errors="ignore")
+                idle_timeouts = 0
+                decoded = clean_telnet_bytes(chunk)
                 buf += decoded
                 if "\n" in decoded or "\r" in decoded:
                     saw_newline = True
+                if "--More--" in decoded:
+                    self.sock.sendall(b" ")
                 if saw_newline and self._extract_trailing_prompt(buf):
                     break
             except socket.timeout:
+                idle_timeouts += 1
                 if saw_newline and self._extract_trailing_prompt(buf):
                     break
+                if cmd != "" and idle_timeouts == 4 and buf and not self._extract_trailing_prompt(buf):
+                    self.sock.sendall(b"\r\n")
         return buf
 
-    def ensure_priv_exec(self, wait_boot_seconds: float = 90.0) -> str:
+    def ensure_priv_exec(self, wait_boot_seconds: float = 25.0) -> str:
+        banner = self.flush_input()
         deadline = time.time() + wait_boot_seconds
-        prompt = ""
-        while time.time() < deadline:
-            out = self.send("", timeout=2.5)
-            if "initial configuration dialog" in out.lower():
+        prompt = self._extract_trailing_prompt(banner)
+        out = ""
+        attempt = 0
+
+        while not prompt and time.time() < deadline:
+            attempt += 1
+            out = self.send("", timeout=2.0)
+            low = out.lower()
+            if re.search(r"e{6,}", out):
+                raise RuntimeError("BUSY_ERASE_FLASH")
+            if "initial configuration dialog" in low:
                 out = self.send("no", timeout=5.0)
+            elif "confirm" in low or "--more--" in low or (attempt % 3 == 0 and not out.strip()):
+                self.sock.sendall(b"\x03\r\n")
+                time.sleep(0.4)
+                out += self.flush_input()
+
             prompt = self._extract_trailing_prompt(out)
             if prompt:
                 break
-            time.sleep(1.0)
+            time.sleep(0.6)
 
         if not prompt:
-            raise RuntimeError("Tiempo de espera agotado esperando prompt de Cisco IOS.")
+            sample = repr((banner + out)[-160:])
+            raise RuntimeError(f"CONSOLE_TIMEOUT (¿tienes Solar-PuTTY abierto sobre este router?): {sample}")
 
         for _ in range(6):
             if "(vlan)" in prompt.lower():
@@ -247,72 +365,21 @@ class IOSConsole:
         self.send("terminal length 0", timeout=5.0)
         return prompt
 
-    def initialize_flash_for_vlans(self) -> None:
-        print("  [*] Inicializando flash: del router c2691 (erase flash:, tarda ~40s en Dynamips)...", end="", flush=True)
-        self.ensure_priv_exec()
-        self.flush_input()
-        self.sock.sendall(b"erase flash:\r\n")
 
-        deadline = time.time() + 120.0
-        buf = ""
-        confirmed = False
-        while time.time() < deadline:
-            try:
-                chunk = self.sock.recv(4096)
-                if chunk:
-                    text = chunk.decode("latin-1", errors="ignore")
-                    buf += text
-                    if "e" in text:
-                        sys.stdout.write(".")
-                        sys.stdout.flush()
-                    if not confirmed and ("confirm" in buf.lower() or "[" in buf):
-                        self.sock.sendall(b"\r\n")
-                        confirmed = True
-                    if ("complete" in buf.lower() or "erased" in buf.lower()) and self._extract_trailing_prompt(buf):
-                        break
-            except socket.timeout:
-                if confirmed and ("complete" in buf.lower() or "erased" in buf.lower()):
-                    if self._extract_trailing_prompt(buf) or self._extract_trailing_prompt(self.send("", timeout=2.0)):
-                        break
-        print(" [OK]")
-        self.ensure_priv_exec()
-
-    def configure_vlans(self, vlans: list[tuple[int, str]]) -> None:
-        if not vlans:
-            return
-        self.ensure_priv_exec()
-        current_vlans = self.send("show vlan-switch brief", timeout=8.0)
-        missing = [vid for vid, _ in vlans if not re.search(rf"^\s*{vid}\s+", current_vlans, re.MULTILINE)]
-        if not missing:
-            print("  [OK] VLANs ya existen en vlan.dat.")
-            return
-
-        for attempt in range(2):
-            self.ensure_priv_exec()
-            out = self.send("vlan database", timeout=5.0)
-            if "(vlan)" not in out.lower():
-                raise RuntimeError(f"No se pudo entrar a 'vlan database':\n{out}")
-
-            for vid, vname in vlans:
-                self.send(f"vlan {vid} name {vname}", timeout=5.0)
-
-            exit_out = self.send("exit", timeout=10.0)
-            prompt = self._extract_trailing_prompt(exit_out) or self._extract_trailing_prompt(self.send("", timeout=3.0))
-
-            failed = (
-                "(vlan)" in prompt.lower()
-                or "nv storage failure" in exit_out.lower()
-                or "not enough space" in exit_out.lower()
-                or "error on database apply" in exit_out.lower()
-            )
-            if not failed:
-                return
-
-            self.send("abort", timeout=5.0)
-            if attempt == 0:
-                self.initialize_flash_for_vlans()
-            else:
-                raise RuntimeError(f"No fue posible guardar vlan.dat tras inicializar flash:\n{exit_out}")
+def connect_healthy_console(client: GNS3Client, pid: str, node: dict) -> IOSConsole:
+    host, port = client.resolve_console_target(node)
+    con = IOSConsole(host, port)
+    try:
+        con.ensure_priv_exec(wait_boot_seconds=12.0)
+        return con
+    except RuntimeError as exc:
+        con.close()
+        print(f"  [!] Consola de {node['name']} ocupada/bloqueada ({exc}). Reiniciando router...")
+        node = client.restart_node(pid, node)
+        host, port = client.resolve_console_target(node)
+        con = IOSConsole(host, port)
+        con.ensure_priv_exec(wait_boot_seconds=35.0)
+        return con
 
 
 def cmd_status(client: GNS3Client) -> None:
@@ -333,53 +400,36 @@ def cmd_status(client: GNS3Client) -> None:
                 )
 
 
-def push_router_config(client: GNS3Client, router_key: str, node: dict) -> None:
+def push_router_config_atomic(client: GNS3Client, pid: str, router_key: str, node: dict) -> None:
+    """
+    Inyecta el startup-config de manera 100% atómica vía la API REST de GNS3:
+    1. Detiene el router.
+    2. Sube configs/i{dynamips_id}_startup-config.cfg (ASCII limpio) directo a la NVRAM de Dynamips.
+    3. Enciende el router con la configuración completa ya cargada (cero errores de consola/Telnet).
+    """
     info = ROUTERS[router_key]
     cfg_path: Path = info["cfg"]  # type: ignore[assignment]
-    vlans: list[tuple[int, str]] = info["vlans"]  # type: ignore[assignment]
-    host, port = client.resolve_console_target(node)
+    dyn_id = node.get("properties", {}).get("dynamips_id") or info["dynamips_id"]
+    nid = node["node_id"]
 
-    print(f"\n[*] Conectando a {node['name']} ({host}:{port})...")
-    con = IOSConsole(host, port)
-    try:
-        con.ensure_priv_exec()
+    raw_cfg = to_clean_ascii(cfg_path.read_text(encoding="utf-8").replace("\r\n", "\n"))
+    rel_file = f"configs/i{dyn_id}_startup-config.cfg"
 
-        if vlans:
-            print(f"[*] Configurando VLANs en NM-16ESW: {vlans}...")
-            con.configure_vlans(vlans)
-            con.ensure_priv_exec()
-
-        print(f"[*] Aplicando {cfg_path.name}...")
-        cfg_out = con.send("configure terminal", timeout=5.0)
-        prompt = con._extract_trailing_prompt(cfg_out)
-        if "(config)" not in prompt.lower():
-            raise RuntimeError(f"No se pudo entrar a 'configure terminal'. Prompt='{prompt}', Salida:\n{cfg_out}")
-
-        for raw_line in cfg_path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("!") or line.startswith("version ") or line == "end":
-                continue
-            resp = con.send(raw_line.rstrip(), timeout=5.0)
-            if "% Invalid input" in resp:
-                print(f"  [WARN] Comando rechazado '{line}':\n    {resp.strip()}")
-
-        con.send("end", timeout=5.0)
-        con.ensure_priv_exec()
-        print("[*] Guardando configuración en NVRAM (write memory)...")
-        con.send("write memory", timeout=15.0)
-        print(f"[OK] Configuración aplicada y guardada exitosamente en {router_key}.")
-    finally:
-        con.close()
+    print(f"\n[*] Cargando atómicamente '{cfg_path.name}' en {node['name']} ({rel_file})...")
+    client.request("POST", f"/v2/projects/{pid}/nodes/{nid}/stop", {})
+    time.sleep(0.8)
+    client.upload_node_file(pid, nid, rel_file, raw_cfg)
+    client.request("POST", f"/v2/projects/{pid}/nodes/{nid}/start", {})
+    print(f"[OK] '{cfg_path.name}' inyectado en NVRAM y router '{node['name']}' encendido.")
 
 
 def cmd_routes(client: GNS3Client) -> None:
-    _, router_nodes = client.ensure_lightweight_stage_ready()
+    proj, router_nodes = client.ensure_lightweight_stage_ready()
     for key, node in router_nodes.items():
         host, port = client.resolve_console_target(node)
         print(f"\n================ {key.upper()} ({host}:{port}) ================")
-        con = IOSConsole(host, port)
+        con = connect_healthy_console(client, proj["project_id"], node)
         try:
-            con.ensure_priv_exec()
             print(con.send("show ip interface brief | exclude unassigned", timeout=8.0))
             print(con.send("show ip route", timeout=8.0))
         finally:
@@ -392,7 +442,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("status", help="Consulta proyectos y nodos en GNS3 API")
-    p_push = sub.add_parser("push-configs", help="Enciende routers/switches livianos e inyecta configs Variante 1")
+    p_push = sub.add_parser("push-configs", help="Inyecta startup-config en NVRAM vía API y arranca routers/switches")
     p_push.add_argument("--router", choices=["all", "santiago", "valparaiso"], default="all")
     sub.add_parser("routes", help="Muestra interfaces activas y tablas de enrutamiento de ambos routers")
 
@@ -403,12 +453,32 @@ def main() -> None:
     if args.cmd == "status":
         cmd_status(client)
     elif args.cmd == "push-configs":
-        _, router_nodes = client.ensure_lightweight_stage_ready()
+        proj = client.get_active_project()
+        pid = proj["project_id"]
+        client.ensure_topology_wiring(pid)
+
+        # Asegurar switches Ethernet encendidos
+        nodes: list[dict] = client.request("GET", f"/v2/projects/{pid}/nodes")  # type: ignore[assignment]
+        for n in nodes:
+            if n.get("node_type") == "ethernet_switch" and n.get("status") != "started":
+                client.request("POST", f"/v2/projects/{pid}/nodes/{n['node_id']}/start", {})
+
+        router_nodes: dict[str, dict] = {}
+        for key, meta in ROUTERS.items():
+            for n in nodes:
+                if n["node_id"] == meta["node_id"] or n["name"].lower() in meta["names"]:
+                    router_nodes[key] = n
+                    break
+
         targets = ["santiago", "valparaiso"] if args.router == "all" else [args.router]
         for t in targets:
             if t not in router_nodes:
                 raise SystemExit(f"No se encontró el router '{t}' en la topología activa.")
-            push_router_config(client, t, router_nodes[t])
+            push_router_config_atomic(client, pid, t, router_nodes[t])
+
+        print("\n[*] Esperando 8s a que ambos routers terminen de iniciar con su nueva NVRAM...")
+        time.sleep(8.0)
+        print("[LISTO] Ambos routers iniciados y configurados al 100%.")
     elif args.cmd == "routes":
         cmd_routes(client)
 

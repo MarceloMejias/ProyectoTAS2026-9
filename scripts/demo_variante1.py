@@ -22,13 +22,20 @@ import argparse
 import re
 import socket
 import time
-from gns3_control import GNS3Client, IOSConsole, SWITCH_V_ID, discover_gns3_config
+from gns3_control import (
+    GNS3Client,
+    IOSConsole,
+    SWITCH_V_ID,
+    clean_telnet_bytes,
+    connect_healthy_console,
+    discover_gns3_config,
+)
 
 
 class VPCSConsole:
     """Cliente TCP simple para consolas de nodos VPCS en GNS3."""
 
-    PROMPT_RE = re.compile(r"^[A-Za-z0-9_-]+>\s*$")
+    PROMPT_RE = re.compile(r"([A-Za-z0-9_\[\]-]+>)\s*$")
 
     def __init__(self, host: str, port: int, timeout: float = 8.0) -> None:
         self.sock = socket.create_connection((host, port), timeout=timeout)
@@ -36,6 +43,12 @@ class VPCSConsole:
 
     def close(self) -> None:
         self.sock.close()
+
+    @classmethod
+    def _has_prompt(cls, text: str) -> bool:
+        lines = [re.sub(r"[\x00-\x1f\x7f]", "", ln).strip() for ln in text.replace("\r", "\n").split("\n")]
+        non_empty = [ln for ln in lines if ln]
+        return bool(non_empty and cls.PROMPT_RE.search(non_empty[-1]))
 
     def send(self, cmd: str, timeout: float = 25.0) -> str:
         self.sock.settimeout(0.05)
@@ -56,16 +69,14 @@ class VPCSConsole:
                 chunk = self.sock.recv(4096)
                 if not chunk:
                     break
-                txt = chunk.decode("latin-1", errors="ignore")
+                txt = clean_telnet_bytes(chunk)
                 buf += txt
                 if "\n" in txt or "\r" in txt:
                     saw_nl = True
-                tail = buf.replace("\r", "\n").split("\n")[-1].strip()
-                if saw_nl and self.PROMPT_RE.match(tail):
+                if saw_nl and self._has_prompt(buf):
                     break
             except socket.timeout:
-                tail = buf.replace("\r", "\n").split("\n")[-1].strip()
-                if saw_nl and self.PROMPT_RE.match(tail):
+                if saw_nl and self._has_prompt(buf):
                     break
         return buf
 
@@ -141,8 +152,9 @@ def setup_mock_dhcp_on_santiago(stgo: IOSConsole, dns_list: str = "192.168.0.34"
     cmds = [
         "configure terminal",
         "service dhcp",
-        "interface Loopback34",
-        "ip address 192.168.0.34 255.255.255.255",
+        "ip dhcp relay information trust-all",
+        "interface FastEthernet0/0",
+        "ip address 192.168.0.34 255.255.255.248 secondary",
         "exit",
         "ip dhcp excluded-address 10.0.0.1",
         "ip dhcp excluded-address 10.0.0.17",
@@ -166,9 +178,12 @@ def setup_mock_dhcp_on_santiago(stgo: IOSConsole, dns_list: str = "192.168.0.34"
 
 def cleanup_mock_dhcp_on_santiago(stgo: IOSConsole) -> None:
     stgo.ensure_priv_exec()
+    stgo.send("clear ip dhcp binding *", timeout=5.0)
     for c in [
         "configure terminal",
-        "no interface Loopback34",
+        "interface FastEthernet0/0",
+        "no ip address 192.168.0.34 255.255.255.248 secondary",
+        "exit",
         "no ip dhcp pool AMBITO_1_VENTAS",
         "no ip dhcp pool AMBITO_2_SOPORTE",
         "no ip dhcp excluded-address 10.0.0.1",
@@ -201,31 +216,30 @@ def main() -> None:
     proj, router_nodes = client.ensure_lightweight_stage_ready()
     vpcs_ventas, vpcs_soporte = ensure_sucursal_vpcs(client, proj["project_id"])
 
-    stgo_h, stgo_p = client.resolve_console_target(router_nodes["santiago"])
-    valpo_h, valpo_p = client.resolve_console_target(router_nodes["valparaiso"])
     ven_h, ven_p = client.resolve_console_target(vpcs_ventas)
     sop_h, sop_p = client.resolve_console_target(vpcs_soporte)
 
-    stgo = IOSConsole(stgo_h, stgo_p)
-    valpo = IOSConsole(valpo_h, valpo_p)
+    stgo = connect_healthy_console(client, proj["project_id"], router_nodes["santiago"])
+    valpo = connect_healthy_console(client, proj["project_id"], router_nodes["valparaiso"])
     c_ven = VPCSConsole(ven_h, ven_p)
     c_sop = VPCSConsole(sop_h, sop_p)
 
     try:
-        stgo.ensure_priv_exec()
-        valpo.ensure_priv_exec()
         c_ven.send("", timeout=3.0)
         c_sop.send("", timeout=3.0)
 
         if args.simular_servidor:
             print("[*] Activando servidor DHCP centralizado temporal (192.168.0.34) en Casa Matriz (0 VMs)...")
+            valpo.send("configure terminal", timeout=5.0)
+            valpo.send("no ip dhcp relay information option", timeout=5.0)
+            valpo.send("end", timeout=5.0)
             setup_mock_dhcp_on_santiago(stgo)
-            time.sleep(1.5)
+            valpo.send("ping 192.168.0.34 repeat 3", timeout=8.0)
 
         pause_step(interactive, "EVIDENCIA 1: Concesión DHCP remota vía Relay en DOS ÁMBITOS (Ventas VLAN 10 y Soporte VLAN 20)")
         print("\n--- [Valparaíso] Verificación de DHCP Relay (ip helper-address 192.168.0.34) ---")
-        print(valpo.send("show ip interface Vlan10 | include Internet|Helper", timeout=6.0))
-        print(valpo.send("show ip interface Vlan20 | include Internet|Helper", timeout=6.0))
+        print(valpo.send("show ip interface FastEthernet0/1.10 | include Internet|Helper", timeout=6.0))
+        print(valpo.send("show ip interface FastEthernet0/1.20 | include Internet|Helper", timeout=6.0))
 
         print("--- [VPCS-Ventas | VLAN 10] Solicitando IP al Ámbito 1 (10.0.0.0/28) ---")
         print(c_ven.send("ip dhcp", timeout=25.0))
@@ -239,7 +253,7 @@ def main() -> None:
 
         pause_step(interactive, "EVIDENCIA 2: Comprobar ACL en Sucursal (Soporte bloqueado hacia Ventas)")
         m_ip = re.search(r"IP/MASK\s*:\s*([0-9.]+)/", ven_ip_info)
-        target_ventas = m_ip.group(1) if m_ip else "10.0.0.2"
+        target_ventas = m_ip.group(1) if (m_ip and m_ip.group(1) != "0.0.0.0") else "10.0.0.1"
         print(f"--- [VPCS-Soporte -> {target_ventas} (Ventas)] Debe ser BLOQUEADO por ACL_SOPORTE_IN ---")
         print(c_sop.send(f"ping {target_ventas} -c 2", timeout=10.0))
         print(valpo.send("show access-lists ACL_SOPORTE_IN", timeout=6.0))
@@ -247,6 +261,7 @@ def main() -> None:
         pause_step(interactive, "EVIDENCIA 3: Cambiar una opción del Ámbito 1 (DNS secundario + Dominio) y renovar")
         if args.simular_servidor:
             print("[*] Modificando Ámbito 1 en Casa Matriz: DNS='192.168.0.34 192.168.0.35', Dominio='sucursal.technomarket.cl'...")
+            stgo.send("clear ip dhcp binding *", timeout=5.0)
             setup_mock_dhcp_on_santiago(stgo, dns_list="192.168.0.34 192.168.0.35", domain="sucursal.technomarket.cl")
         else:
             print("Ejecuta ahora en tu VM DNSDHCP: sudo bash cambiar_opcion_ambito_dhcp.sh 192.168.0.35")
