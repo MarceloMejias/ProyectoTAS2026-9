@@ -1,0 +1,50 @@
+# =============================================================================
+# Discos virtuales, imágenes ISO y archivos pesados de VMware / VirtualBox
+# =============================================================================
+*.vmdk
+*.ova
+*.iso
+*.nvram
+*.vmsd
+*.vmxf
+*.vmem
+*.vmss
+*.scoreboard
+*.lck/
+*.lock/
+vmware*.log
+
+# =============================================================================
+# Imágenes Cisco IOS, archivos empaquetados y proyecto de trabajo GNS3
+# =============================================================================
+*.image
+*.bin
+*.tar.gz
+*.zip
+*.7z
+*.ghost
+*.rom
+*.ssa
+*_slot*
+*.backup
+gns3/ProyectoTAS/
+
+# =============================================================================
+# Python / Entornos virtuales / Scripts
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.env
+
+# =============================================================================
+# Sistema Operativo / Editores
+# =============================================================================
+desktop.ini
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/

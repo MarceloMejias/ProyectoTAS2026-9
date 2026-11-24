@@ -1,0 +1,2 @@
+SHA256(RockyTAS.ovf)= ea43ce6d10d0cee8ec4957985941badabbf51efdf1bcb60656b1676ebbe56f6e
+SHA256(RockyTAS-disk1.vmdk)= 194ed1e7ccec1af54ada4d85b574cf70d0f6f93c6e6fb481bff95c4f19f485fa
