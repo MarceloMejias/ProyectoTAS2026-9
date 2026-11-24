@@ -12,7 +12,7 @@ Los archivos `.ovf` y `.mf` dentro de la carpeta `vmware/` **ya fueron reparados
    - `vmware/PC1-WIN/PC1-WIN.ovf` (Cliente Windows para departamentos)
    - `vmware/RockyTAS/RockyTAS.ovf` (Base Rocky Linux para `DNSDHCP` y `HTTPS`)
    - `vmware/WIN-Server/WIN-Server.ovf` (Servidor `ACDC`)
-   - *(Para `FirewallSantiago`, importar el OVF/ISO de **pfSense CE 2.7.x** con 3 adaptadores de red `e1000` y 1 GB RAM).*
+   - `vmware/pfSense/FirewallSantiago.vmx` (**ya generada** con 1 GB RAM, disco de 8 GB, 3 adaptadores `e1000` e ISO `images/pfSense-CE-2.7.0-RELEASE-amd64.iso` montada: ábrela en VMware, instala pfSense con valores por defecto —ZFS o UFS—, apágala y desconecta el CD/DVD en *VM Settings* para que arranque desde el disco).
 2. En VMware (**Edit $\rightarrow$ Virtual Network Editor** $\rightarrow$ *Change Settings*):
    - En las redes `VMnet` tipo *Host-only* que utilice GNS3, **desmarcar "Use local DHCP service to distribute IP address to VMs"** para que no compita con el servidor `DNSDHCP` de la DMZ.
 

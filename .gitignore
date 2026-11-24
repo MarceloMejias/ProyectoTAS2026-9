@@ -2,6 +2,7 @@
 # Discos virtuales, imágenes ISO y archivos pesados de VMware / VirtualBox
 # =============================================================================
 *.vmdk
+*.vmx
 *.ova
 *.iso
 *.nvram

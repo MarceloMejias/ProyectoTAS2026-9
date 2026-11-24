@@ -13,7 +13,8 @@ Repositorio de configuraciones, automatización y documentación técnica para e
 .
 ├── Actividad_1_TechnoMarket_Final.pdf   # Enunciado oficial y rúbrica de evaluación
 ├── images/                              # Imágenes Cisco IOS locales (c2691 y c7200; binarios ignorados en Git)
-├── vmware/                              # Plantillas OVF reparadas (sin dependencia de ISOs) y discos VMDK
+├── vmware/                              # Plantillas OVF reparadas y VMs listas para VMware
+│   ├── pfSense/                         # VM FirewallSantiago lista con 3 NICs e1000 e ISO montada
 │   ├── PC1-WIN/                         # Cliente Windows departamental
 │   ├── RockyTAS/                        # Base Rocky Linux (DNSDHCP y HTTPS)
 │   └── WIN-Server/                      # Servidor Windows (ACDC)
@@ -29,6 +30,7 @@ Repositorio de configuraciones, automatización y documentación técnica para e
 │       └── setup_https_rocky.sh         # Automatización Portal Web Corporativo HTTP (DMZ .36)
 ├── scripts/
 │   ├── install_gns3_images.ps1          # Copia las imágenes IOS de ./images al proyecto y a GNS3 global
+│   ├── create_pfsense_vm.ps1            # Genera vmware/pfSense/FirewallSantiago.vmx desde la ISO de pfSense
 │   ├── fix_gns3_paths.py                # Utilidad offline: inspeccionar GNS3, cambiar IOS c2691 y crear 2do enlace WAN
 │   ├── gns3_control.py                  # Control en vivo: estado GNS3 API, inyección de configs por Telnet y rutas
 │   └── demo_variante9.py                # Demostración guiada/automática de falla y restauración WAN (Variante 9)

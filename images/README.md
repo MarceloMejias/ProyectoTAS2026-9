@@ -6,6 +6,7 @@ Esta carpeta almacena localmente las imágenes IOS requeridas por Dynamips en GN
 | :--- | :--- | :--- |
 | `c2691-adventerprisek9_sna-mz.124-13b.image` | Cisco `c2691` | Routers `Santiago` y `Vina` / `Valparaiso` (`MD5: 0b25113b4d92306aa4edc2e03fa52e82`) |
 | `c7200-advipservicesk9-mz.152-4.S5.bin` | Cisco `c7200` | Imagen alternativa / de respaldo |
+| `pfSense-CE-2.7.0-RELEASE-amd64.iso` | FreeBSD / pfSense CE 2.7.0 | Instalador para `FirewallSantiago` (`vmware/pfSense/`) |
 
 ## Instalación rápida en GNS3
 
