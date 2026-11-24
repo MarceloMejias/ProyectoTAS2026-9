@@ -22,12 +22,12 @@ Los archivos `.ovf` y `.mf` dentro de la carpeta `vmware/` **ya fueron reparados
 
 ## 2. Imagen Cisco IOS (`c2691`) en GNS3
 
-El proyecto utiliza routers Dynamips `c2691` con imagen `c2691-adventerprisek9_sna-mz.124-13b.image`.
+Las imágenes requeridas (`c2691-adventerprisek9_sna-mz.124-13b.image` con MD5 exacto `0b25113b4d92306aa4edc2e03fa52e82`, y `c7200-advipservicesk9-mz.152-4.S5.bin`) se encuentran en la carpeta `images/`.
 
-- **Si tienes ese mismo archivo `.image`:** cópialo en `C:\Users\<TuUsuario>\GNS3\images\IOS\`.
-- **Si tienes otra imagen de `c2691`:** cierra el proyecto en GNS3 y ejecuta:
+- Ya fueron copiadas dentro de `gns3/ProyectoTAS/ProyectoTAS/project-files/images/` para que el proyecto abra directamente.
+- Para instalarlas también en tu carpeta global `%USERPROFILE%\GNS3\images\IOS\`, ejecuta:
   ```powershell
-  python scripts/fix_gns3_paths.py set-ios "C:\Ruta\A\Tu\c2691-otra-version.image"
+  powershell -ExecutionPolicy Bypass -File scripts/install_gns3_images.ps1
   ```
 
 ---
