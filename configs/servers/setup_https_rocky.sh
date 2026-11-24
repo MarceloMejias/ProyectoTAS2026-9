@@ -58,7 +58,7 @@ cat >"$DOCROOT/index.html" <<'EOF'
     <p>Servicio HTTP interno operativo y resuelto mediante DNS corporativo (<code>www.technomarket.cl</code>).</p>
     <ul>
       <li><strong>Sedes conectadas:</strong> Casa Matriz (Santiago) &harr; Sucursal (Valparaíso)</li>
-      <li><strong>Equipo 9:</strong> Redundancia de enrutamiento de Capa 3 activa</li>
+      <li><strong>Equipo 1:</strong> DHCP Centralizado entre Sedes con Relay Multi-Ámbito activo</li>
     </ul>
   </div>
 </body>

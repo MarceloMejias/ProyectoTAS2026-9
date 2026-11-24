@@ -31,7 +31,7 @@ En la topología GNS3, `FirewallSantiago` tiene 3 adaptadores (`e0`, `e1`, `e2` 
 2. **Desactivar NAT saliente (`Firewall -> NAT -> Outbound`):**
    - Cambiar a **Disable Outbound NAT rule generation** para que pfSense enrute de forma transparente entre Casa Matriz, DMZ y Sucursal sin ocultar las IPs reales de las VLANs (necesario para que las ACLs y el DHCP Relay funcionen con las IPs reales de cada departamento).
 3. **Gateway y Rutas Estáticas (`System -> Routing`):**
-   - Crear Gateway `GW_SANTIAGO` en interfaz `WAN` con IP `192.168.0.41` y marcarlo como *Default Gateway* (o agregar rutas estáticas hacia `10.0.0.0/28`, `10.0.0.16/28`, `10.0.0.32/28`, `10.10.10.0/30` y `10.10.10.4/30` vía `192.168.0.41`).
+   - Crear Gateway `GW_SANTIAGO` en interfaz `WAN` con IP `192.168.0.41` y marcarlo como *Default Gateway* (o agregar rutas estáticas hacia `10.0.0.0/28`, `10.0.0.16/28`, `10.0.0.32/28` y `10.10.10.0/30` vía `192.168.0.41`).
 
 ### 3. Configurar DHCP Relay (`Services -> DHCP Relay`)
 - Marcar **Enable DHCP relay on interface**.

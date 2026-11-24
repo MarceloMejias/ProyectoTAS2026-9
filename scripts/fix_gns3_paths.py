@@ -5,8 +5,6 @@ Utilidad offline para adaptar ProyectoTAS.gns3 de Linux (/home/victor/...) a Win
 2. fix-vmware-paths: Corrige las rutas Linux (/home/victor/...) en ProyectoTAS.gns3 y limpia
                      ISOs/pipes de Linux dentro de los archivos .vmx del proyecto.
 3. set-ios:          Actualiza el nombre/MD5 de la imagen IOS c2691 si usas otra versión.
-4. add-backup-link:  Inyecta el segundo enlace WAN de Capa 3 (Variante 9):
-                     Santiago (Fa1/0) <-> Vina (Fa0/1).
 
 Importante: Cierra GNS3 antes de ejecutar comandos que modifiquen ProyectoTAS.gns3.
 """
@@ -18,14 +16,10 @@ import hashlib
 import json
 import re
 import shutil
-import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_GNS3 = ROOT / "gns3" / "ProyectoTAS" / "ProyectoTAS" / "ProyectoTAS.gns3"
-
-SANTIAGO_ID = "19d852b9-922e-4eec-ab39-248aa419245b"
-VINA_ID = "4f30d82d-9494-4bb1-8abd-e751783ac5a3"
 
 
 def backup_file(path: Path) -> Path:
@@ -48,7 +42,6 @@ def clean_linux_vmx(vmx_file: Path) -> None:
             out.append(f'{prefix}.present = "FALSE"')
             continue
         if re.match(r'^(ide\d+:\d+|sata\d+:\d+)\.present\s*=\s*"TRUE"', stripped):
-            # Se desactiva si apuntaba a una ISO de Linux
             continue
         if stripped.startswith("filesearchpath") and "/home/" in stripped:
             out.append('filesearchpath = "."')
@@ -89,12 +82,20 @@ def cmd_inspect(gns3_path: Path) -> None:
 def cmd_fix_vmware_paths(gns3_path: Path) -> None:
     data = json.loads(gns3_path.read_text(encoding="utf-8"))
     vmware_dir = gns3_path.parent / "project-files" / "vmware"
+    pfsense_standalone = (ROOT / "vmware" / "pfSense" / "FirewallSantiago.vmx").resolve()
     bak = backup_file(gns3_path)
 
     fixed_nodes = 0
     for node in data["topology"]["nodes"]:
         if node.get("node_type") != "vmware":
             continue
+        if node.get("name") == "FirewallSantiago" and pfsense_standalone.exists():
+            node["properties"]["vmx_path"] = str(pfsense_standalone)
+            node["properties"]["linked_clone"] = False
+            fixed_nodes += 1
+            print(f"[OK] {node['name']:24s} -> {pfsense_standalone}")
+            continue
+
         node_id = node["node_id"]
         old_vmx = node.get("properties", {}).get("vmx_path", "")
         vmx_name = Path(old_vmx).name
@@ -132,58 +133,6 @@ def cmd_set_ios(gns3_path: Path, image_file: Path) -> None:
     print(f"Actualizados {updated} routers a imagen '{image_file.name}' (md5={md5}).")
 
 
-def cmd_add_backup_link(gns3_path: Path) -> None:
-    data = json.loads(gns3_path.read_text(encoding="utf-8"))
-    links = data["topology"]["links"]
-
-    for link in links:
-        endpoints = {
-            (ep["node_id"], ep["adapter_number"], ep["port_number"])
-            for ep in link["nodes"]
-        }
-        if (SANTIAGO_ID, 1, 0) in endpoints or (VINA_ID, 0, 1) in endpoints:
-            print("Ya existe un enlace usando Santiago Fa1/0 o Vina Fa0/1. No se realizaron cambios.")
-            return
-
-    bak = backup_file(gns3_path)
-    new_link = {
-        "filters": {},
-        "link_id": str(uuid.uuid4()),
-        "link_style": {"color": "#0084ff", "type": 1, "width": 2},
-        "nodes": [
-            {
-                "adapter_number": 1,
-                "label": {
-                    "rotation": 0,
-                    "style": "font-family: TypeWriter;font-size: 10.0;font-weight: bold;fill: #0084ff;fill-opacity: 1.0;",
-                    "text": "f1/0 (Backup)",
-                    "x": 68,
-                    "y": 42,
-                },
-                "node_id": SANTIAGO_ID,
-                "port_number": 0,
-            },
-            {
-                "adapter_number": 0,
-                "label": {
-                    "rotation": 0,
-                    "style": "font-family: TypeWriter;font-size: 10.0;font-weight: bold;fill: #0084ff;fill-opacity: 1.0;",
-                    "text": "f0/1 (Backup)",
-                    "x": -35,
-                    "y": 42,
-                },
-                "node_id": VINA_ID,
-                "port_number": 1,
-            },
-        ],
-        "suspend": False,
-    }
-    links.append(new_link)
-    gns3_path.write_text(json.dumps(data, indent=4), encoding="utf-8")
-    print(f"Respaldo creado en: {bak}")
-    print("Enlace de respaldo agregado: Santiago Fa1/0 <-> Vina Fa0/1 (10.10.10.4/30).")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Utilidad para inspeccionar y ajustar ProyectoTAS.gns3")
     parser.add_argument("--gns3", type=Path, default=DEFAULT_GNS3, help="Ruta a ProyectoTAS.gns3")
@@ -195,8 +144,6 @@ def main() -> None:
     p_ios = sub.add_parser("set-ios", help="Cambia la imagen IOS de los routers c2691")
     p_ios.add_argument("image_path", type=Path, help="Ruta al archivo .image/.bin que tienes en GNS3\\images\\IOS")
 
-    sub.add_parser("add-backup-link", help="Agrega el 2do enlace WAN (Santiago Fa1/0 <-> Vina Fa0/1) para Variante 9")
-
     args = parser.parse_args()
     if not args.gns3.exists():
         raise SystemExit(f"No se encontró el archivo GNS3 en: {args.gns3}")
@@ -207,8 +154,6 @@ def main() -> None:
         cmd_fix_vmware_paths(args.gns3)
     elif args.action == "set-ios":
         cmd_set_ios(args.gns3, args.image_path)
-    elif args.action == "add-backup-link":
-        cmd_add_backup_link(args.gns3)
 
 
 if __name__ == "__main__":

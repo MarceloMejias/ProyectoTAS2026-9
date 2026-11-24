@@ -1,4 +1,4 @@
-﻿# =============================================================================
+# =============================================================================
 # Crea la máquina virtual VMware lista para instalar y usar como FirewallSantiago
 # en vmware/pfSense/ usando images/pfSense-CE-2.7.0-RELEASE-amd64.iso
 # =============================================================================
